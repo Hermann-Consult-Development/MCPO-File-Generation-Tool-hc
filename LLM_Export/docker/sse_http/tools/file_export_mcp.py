@@ -42,11 +42,11 @@ from pptx.enum.shapes import PP_PLACEHOLDER
 from pptx.parts.image import Image
 from pptx.enum.text import MSO_AUTO_SIZE
 from io import BytesIO
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem, Image as ReportLabImage
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem, Image as ReportLabImage, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT
-from reportlab.lib.units import mm
+from reportlab.lib.enums import TA_LEFT, TA_CENTER
+from reportlab.lib.units import mm, inch
 
 #NonDockerImport
 import asyncio
@@ -54,6 +54,7 @@ import uvicorn
 from typing import Any, Union, List
 from typing_extensions import TypedDict
 from mcp.server.sse import SseServerTransport
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
@@ -528,6 +529,89 @@ def render_html_elements(soup):
                         spaceBefore=6,
                         spaceAfter=10
                     ))
+            elif tag_name == "table":
+                log.debug("Processing table...")
+                table_data = []
+                has_header = False
+
+                # Check for thead/tbody structure or direct tr children
+                thead = elem.find("thead")
+                tbody = elem.find("tbody")
+
+                # Process header rows
+                if thead:
+                    for tr in thead.find_all("tr", recursive=False):
+                        row = []
+                        for cell in tr.find_all(["th", "td"], recursive=False):
+                            cell_text = render_text_with_emojis(cell.get_text().strip())
+                            row.append(Paragraph(cell_text, styles["CustomNormal"]))
+                        if row:
+                            table_data.append(row)
+                            has_header = True
+
+                # Process body rows
+                if tbody:
+                    for tr in tbody.find_all("tr", recursive=False):
+                        row = []
+                        for cell in tr.find_all(["th", "td"], recursive=False):
+                            cell_text = render_text_with_emojis(cell.get_text().strip())
+                            row.append(Paragraph(cell_text, styles["CustomNormal"]))
+                        if row:
+                            table_data.append(row)
+                else:
+                    # No thead/tbody, process all tr directly
+                    for tr in elem.find_all("tr", recursive=False):
+                        row = []
+                        cells = tr.find_all(["th", "td"], recursive=False)
+                        for cell in cells:
+                            cell_text = render_text_with_emojis(cell.get_text().strip())
+                            row.append(Paragraph(cell_text, styles["CustomNormal"]))
+                            if cell.name == "th" and not has_header:
+                                has_header = True
+                        if row:
+                            table_data.append(row)
+
+                if table_data:
+                    # Ensure all rows have the same number of columns
+                    max_cols = max(len(row) for row in table_data)
+                    for row in table_data:
+                        while len(row) < max_cols:
+                            row.append(Paragraph("", styles["CustomNormal"]))
+
+                    log.debug(f"Creating table with {len(table_data)} rows and {max_cols} columns")
+
+                    # Calculate column widths (distribute evenly, max 6.5 inches total for letter page with margins)
+                    available_width = 6.5 * inch
+                    col_width = available_width / max_cols
+                    col_widths = [col_width] * max_cols
+
+                    # Create the table
+                    pdf_table = Table(table_data, colWidths=col_widths)
+
+                    # Define table style
+                    table_style = [
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#E8E8E8") if has_header else colors.white),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor("#0A1F44") if has_header else colors.black),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold' if has_header else 'Helvetica'),
+                        ('FONTSIZE', (0, 0), (-1, -1), 10),
+                        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                        ('TOPPADDING', (0, 0), (-1, -1), 8),
+                        ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                    ]
+
+                    # Add alternating row colors for better readability
+                    for i in range(1, len(table_data)):
+                        if i % 2 == 0:
+                            table_style.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor("#F9F9F9")))
+
+                    pdf_table.setStyle(TableStyle(table_style))
+                    story.append(pdf_table)
+                    story.append(Spacer(1, 10))
+                    log.debug("Table added to story")
             elif tag_name == "blockquote":
                 text = render_text_with_emojis(elem.get_text().strip())
                 if text:
@@ -795,6 +879,23 @@ def _create_pdf(text: str | list[str], filename: str, folder_path: str | None = 
                     md_parts.append(item.get("text",""))
                 elif t == "list":
                     md_parts.append("\n".join([f"- {x}" for x in item.get("items",[])]))
+                elif t == "table":
+                    headers = item.get("headers", [])
+                    rows = item.get("rows", [])
+                    data = item.get("data", [])
+                    table_lines = []
+                    if headers and rows:
+                        table_lines.append("| " + " | ".join(str(h) for h in headers) + " |")
+                        table_lines.append("| " + " | ".join("---" for _ in headers) + " |")
+                        for row in rows:
+                            table_lines.append("| " + " | ".join(str(c) for c in row) + " |")
+                    elif data:
+                        for i, row in enumerate(data):
+                            table_lines.append("| " + " | ".join(str(c) for c in row) + " |")
+                            if i == 0:
+                                table_lines.append("| " + " | ".join("---" for _ in row) + " |")
+                    if table_lines:
+                        md_parts.append("\n".join(table_lines))
                 elif t in ("image","image_query"):
                     query = item.get("query","")
                     if query:
@@ -3575,6 +3676,11 @@ if __name__ == "__main__":
         log.info(f"Starting file_export_mcp in http mode on http://{host}:{port}")
         log.info(f"HTTP endpoint: http://{host}:{port}/mcp")
 
+        mcp.settings.host = host
+        mcp.settings.port = port
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        )
         mcp.run(
             transport="streamable-http"
         )
