@@ -718,6 +718,9 @@ def _convert_markdown_to_structured(markdown_content):
             structured.append({"text": line[2:].strip(), "type": "bullet"})
         elif line.startswith('**') and line.endswith('**'):
             structured.append({"text": line[2:-2].strip(), "type": "bold"})
+        elif re.match(r'^\d+\.\s+', line):
+            text = re.sub(r'^\d+\.\s+', '', line)
+            structured.append({"text": text.strip(), "type": "numbered"})
         else:
             structured.append({"text": line, "type": "paragraph"})
     
@@ -1152,6 +1155,25 @@ def _create_presentation(slides_data: list[dict], filename: str, folder_path: st
     prs.save(filepath)
     return {"url": _public_url(folder_path, fname), "path": filepath}
 
+def _add_markdown_runs(paragraph, text):
+    """
+    Add runs to a paragraph, converting inline **bold** and *italic* markdown to Word formatting.
+    """
+    if not text:
+        return
+    tokens = re.split(r'(\*\*(?:(?!\*\*).)+?\*\*|\*(?!\*)(?:(?!\*).)+?\*(?!\*))', text)
+    for token in tokens:
+        if not token:
+            continue
+        if token.startswith('**') and token.endswith('**'):
+            run = paragraph.add_run(token[2:-2])
+            run.font.bold = True
+        elif token.startswith('*') and token.endswith('*') and not token.startswith('**'):
+            run = paragraph.add_run(token[1:-1])
+            run.font.italic = True
+        else:
+            paragraph.add_run(token)
+
 def _create_word(content: list[dict] | str, filename: str, folder_path: str | None = None, title: str | None = None) -> dict:
     log.debug("Creating Word document")
 
@@ -1214,7 +1236,8 @@ def _create_word(content: list[dict] | str, filename: str, folder_path: str | No
 
     for item in content or []:
         if isinstance(item, str):
-            doc.add_paragraph(item)
+            p = doc.add_paragraph()
+            _add_markdown_runs(p, item)
         elif isinstance(item, dict):
             if item.get("type") == "image_query":
                 new_item = {
@@ -1235,37 +1258,76 @@ def _create_word(content: list[dict] | str, filename: str, folder_path: str | No
             elif "type" in item:
                 item_type = item.get("type")
                 if item_type == "title":
-                    paragraph = doc.add_paragraph(item.get("text", ""))
+                    paragraph = doc.add_paragraph()
+                    _add_markdown_runs(paragraph, item.get("text", ""))
                     try:
                         paragraph.style = doc.styles['Heading 1']
                     except KeyError:
-                        run = paragraph.runs[0] if paragraph.runs else paragraph.add_run()
-                        run.font.size = DocxPt(18)
-                        run.font.bold = True
+                        for run in paragraph.runs:
+                            run.font.size = DocxPt(18)
+                            run.font.bold = True
                     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     log.debug("Title added")
                 elif item_type == "subtitle":
-                    paragraph = doc.add_paragraph(item.get("text", ""))
+                    paragraph = doc.add_paragraph()
+                    _add_markdown_runs(paragraph, item.get("text", ""))
                     try:
                         paragraph.style = doc.styles['Heading 2']
                     except KeyError:
-                        run = paragraph.runs[0] if paragraph.runs else paragraph.add_run()
-                        run.font.size = DocxPt(16)
-                        run.font.bold = True
+                        for run in paragraph.runs:
+                            run.font.size = DocxPt(16)
+                            run.font.bold = True
                     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     log.debug("Subtitle added")
+                elif item_type == "heading":
+                    paragraph = doc.add_paragraph()
+                    _add_markdown_runs(paragraph, item.get("text", ""))
+                    try:
+                        paragraph.style = doc.styles['Heading 2']
+                    except KeyError:
+                        for run in paragraph.runs:
+                            run.font.size = DocxPt(16)
+                            run.font.bold = True
+                    log.debug("Heading added")
+                elif item_type == "subheading":
+                    paragraph = doc.add_paragraph()
+                    _add_markdown_runs(paragraph, item.get("text", ""))
+                    try:
+                        paragraph.style = doc.styles['Heading 3']
+                    except KeyError:
+                        for run in paragraph.runs:
+                            run.font.size = DocxPt(14)
+                            run.font.bold = True
+                    log.debug("Subheading added")
+                elif item_type == "bold":
+                    paragraph = doc.add_paragraph()
+                    run = paragraph.add_run(item.get("text", ""))
+                    run.font.bold = True
+                    log.debug("Bold paragraph added")
                 elif item_type == "paragraph":
-                    doc.add_paragraph(item.get("text", ""))
+                    p = doc.add_paragraph()
+                    _add_markdown_runs(p, item.get("text", ""))
                     log.debug("Paragraph added")
-                elif item_type == "list":
-                    items = item.get("items", [])
+                elif item_type in ("bullet", "list"):
+                    items = item.get("items", [item.get("text", "")])
+                    if isinstance(items, str):
+                        items = [items]
                     for i, item_text in enumerate(items):
-                        paragraph = doc.add_paragraph(item_text)
+                        paragraph = doc.add_paragraph()
+                        _add_markdown_runs(paragraph, item_text)
                         try:
                             paragraph.style = doc.styles['List Bullet']
                         except KeyError:
                             paragraph.style = doc.styles['Normal']
                     log.debug("List added")
+                elif item_type == "numbered":
+                    paragraph = doc.add_paragraph()
+                    _add_markdown_runs(paragraph, item.get("text", ""))
+                    try:
+                        paragraph.style = doc.styles['List Number']
+                    except KeyError:
+                        paragraph.style = doc.styles['Normal']
+                    log.debug("Numbered item added")
                 elif item_type == "image":
                     image_query = item.get("query")
                     if image_query:
@@ -1290,9 +1352,9 @@ def _create_word(content: list[dict] | str, filename: str, folder_path: str | No
                                         break
                             except Exception:
                                 pass
-                        
+
                         table = doc.add_table(rows=len(data), cols=len(data[0]) if data else 0)
-                        
+
                         if template_table_style:
                             try:
                                 table.style = template_table_style
@@ -1310,18 +1372,18 @@ def _create_word(content: list[dict] | str, filename: str, folder_path: str | No
                                         continue
                             except Exception as e:
                                 log.debug(f"Could not apply any table style: {e}")
-                        
+
                         for i, row in enumerate(data):
                             for j, cell in enumerate(row):
                                 cell_obj = table.cell(i, j)
                                 cell_obj.text = str(cell)
-                                
+
                                 if i == 0:
                                     for paragraph in cell_obj.paragraphs:
                                         for run in paragraph.runs:
                                             run.font.bold = True
                                         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        
+
                         if not template_table_style:
                             try:
                                 tbl = table._tbl
@@ -1330,10 +1392,11 @@ def _create_word(content: list[dict] | str, filename: str, folder_path: str | No
                                 tblPr.append(tblBorders)
                             except Exception as e:
                                 log.debug(f"Could not add table borders: {e}")
-                        
+
                         log.debug("Table added with improved styling")
             elif "text" in item:
-                doc.add_paragraph(item["text"])
+                p = doc.add_paragraph()
+                _add_markdown_runs(p, item["text"])
                 log.debug("Paragraph added")
     
     doc.save(filepath)
