@@ -40,6 +40,8 @@ jobs:
           platforms: linux/amd64
           load: true
           push: false
+          build-args: |
+            SOURCE_REVISION=${{ github.sha }}
           tags: ghcr.io/hermann-consult-development/${{ matrix.image }}:${{ github.event_name == 'pull_request' && 'pr-validation' || github.ref_name }}
       - name: Verify actual MCPO image
         if: matrix.image == 'owui-mcpo'
