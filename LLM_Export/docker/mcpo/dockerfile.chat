@@ -9,6 +9,6 @@ COPY config.json /rootPath/config.json
 COPY tools /rootPath/tools
 ENV REQUIRE_USER_AUTH=true LOG_LEVEL=INFO
 ARG SOURCE_REVISION=unknown
-LABEL org.opencontainers.image.version="0.8.1-hc.1" \
+LABEL org.opencontainers.image.version="0.8.1-hc.2" \
       org.opencontainers.image.source="https://github.com/Hermann-Consult-Development/MCPO-File-Generation-Tool-hc" \
       org.opencontainers.image.revision="${SOURCE_REVISION}"

@@ -17,7 +17,8 @@ import zipfile
 import py7zr
 import logging
 import requests
-from .file_security import REQUIRE_USER_AUTH, safe_filename, safe_join, user_token as _user_token, file_id as checked_file_id, http_get, http_post, public_error, validate_generated_content
+from .file_security import REQUIRE_USER_AUTH, FilePolicyError, safe_filename, safe_join, user_token as _user_token, file_id as checked_file_id, http_get, http_post, public_error, validate_generated_content
+from .spreadsheet_formulas import relocate_formula
 from requests.auth import HTTPBasicAuth
 import threading
 import markdown2
@@ -49,8 +50,9 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from reportlab.lib.units import mm, inch
+from reportlab.lib.pagesizes import A4
 
-SCRIPT_VERSION = "0.8.1-hc.1"
+SCRIPT_VERSION = "0.8.1-hc.2"
 
 URL = os.getenv('OWUI_URL')
 TOKEN = os.getenv('JWT_SECRET') ## will be deleted in 1.0.0
@@ -581,13 +583,14 @@ def render_html_elements(soup):
 
                     log.debug(f"Creating table with {len(table_data)} rows and {max_cols} columns")
 
-                    # Calculate column widths (distribute evenly, max 6.5 inches total for letter page with margins)
-                    available_width = 6.5 * inch
+                    # Match the A4 document frame, including its 6pt side padding.
+                    available_width = A4[0] - 2 * 72 - 12
                     col_width = available_width / max_cols
                     col_widths = [col_width] * max_cols
 
                     # Create the table
-                    pdf_table = Table(table_data, colWidths=col_widths)
+                    pdf_table = Table(table_data, colWidths=col_widths,
+                                      repeatRows=1 if has_header else 0, splitInRow=1)
 
                     # Define table style
                     table_style = [
@@ -596,7 +599,7 @@ def render_html_elements(soup):
                         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold' if has_header else 'Helvetica'),
                         ('FONTSIZE', (0, 0), (-1, -1), 10),
                         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
                         ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
                         ('TOPPADDING', (0, 0), (-1, -1), 8),
@@ -813,7 +816,11 @@ def _create_excel(data: list[list[str]], filename: str, folder_path: str | None 
             cell = ws.cell(row=start_row + r, column=start_col + c)
             
             if r < len(data) and c < len(data[0]):
-                cell.value = data[r][c]
+                value = data[r][c]
+                if isinstance(value, str) and value.startswith('='):
+                    value = relocate_formula(value, start_row - 1, start_col - 1,
+                                             ws.title, wb.sheetnames)
+                cell.value = value
                 if r == 0 and data[r][c]:  
                     from openpyxl.styles import Font
                     cell.font = Font(bold=True)
@@ -919,13 +926,12 @@ def _create_pdf(text: str | list[str], filename: str, folder_path: str | None = 
     soup = BeautifulSoup(html, "html.parser")
     story = render_html_elements(soup) or [Paragraph("Empty Content", styles["CustomNormal"])]
 
-    doc = SimpleDocTemplate(filepath, topMargin=72, bottomMargin=72, leftMargin=72, rightMargin=72)
+    doc = SimpleDocTemplate(filepath, pagesize=A4, topMargin=72, bottomMargin=72, leftMargin=72, rightMargin=72)
     try:
         doc.build(story)
     except Exception as e:
-        log.error(f"Error building PDF {fname}: {e}", exc_info=True)
-        doc2 = SimpleDocTemplate(filepath)
-        doc2.build([Paragraph("Error in PDF generation", styles["CustomNormal"])])
+        log.error("PDF layout failed", exc_info=True)
+        raise FilePolicyError("PDF generation failed; no file was uploaded. Reduce oversized headers or unsupported layout elements.") from e
 
     return {"url": _public_url(folder_path, fname), "path": filepath}
 
@@ -1413,7 +1419,9 @@ def _create_word(content: list[dict] | str, filename: str, folder_path: str | No
                                 tbl = table._tbl
                                 tblPr = tbl.tblPr
                                 tblBorders = parse_xml(r'<w:tblBorders {}><w:top w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:left w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:right w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="000000"/></w:tblBorders>'.format(nsdecls('w')))
-                                tblPr.append(tblBorders)
+                                tblPr.insert_element_before(tblBorders, 'w:shd', 'w:tblLayout',
+                                                            'w:tblCellMar', 'w:tblLook',
+                                                            'w:tblCaption', 'w:tblDescription', 'w:tblPrChange')
                             except Exception as e:
                                 log.debug(f"Could not add table borders: {e}")
 
@@ -3016,7 +3024,14 @@ async def create_file(data: dict, persistent: bool = PERSISTENT_FILES, mcpo_head
 "{"data": {"format":"pptx","filename":"slides.pptx","slides_data":[{"title":"...","content":[...],"image_query":"...","image_position":"left|right|top|bottom","image_size":"small|medium|large"}],"title":"..."}}"
 "{"data": {"format":"xlsx","filename":"data.xlsx","content":[["Header1","Header2"],["Val1","Val2"]],"title":"..."}}"
 "{"data": {"format":"csv","filename":"data.csv","content":[[...]]}}"
-"{"data": {"format":"txt|xml|py|etc","filename":"file.ext","content":"string"}}" """
+"{"data": {"format":"txt|xml|py|etc","filename":"file.ext","content":"string"}}"
+XLSX supplies one rectangular grid starting at logical A1. A1 formulas (including
+$ anchors and explicit references to the output sheet) move with that grid when
+a template places it elsewhere. Existing other sheets are not moved. Named or
+structured ranges, INDIRECT, external workbooks and multi-sheet ranges are unsupported
+and return an error. Formula results are calculated when opened in a spreadsheet
+application; this tool does not fabricate cached values.
+"""
     token = _forwarded_token(mcpo_headers)
     validate_generated_content(data)
     filename = data.get("filename")

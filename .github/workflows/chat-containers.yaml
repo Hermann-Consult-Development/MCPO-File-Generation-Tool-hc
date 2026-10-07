@@ -46,19 +46,22 @@ jobs:
       - name: Verify actual MCPO image
         if: matrix.image == 'owui-mcpo'
         run: |
+          python3 -m pip download --only-binary=:all: --no-deps -r tests/requirements.txt -d .test-wheels
           docker run --rm --memory=4g --cpus=2 --network=none \
-            --entrypoint /app/.venv/bin/python -e PYTHONPATH=/rootPath \
+            --entrypoint /bin/sh -e PYTHONPATH=/tmp/hc-test-deps:/rootPath \
+            -v "$PWD/.test-wheels:/test-wheels:ro" \
             -v "$PWD/tests:/tests:ro" \
             -v "$PWD/LLM_Export/docker/file_server:/LLM_Export/docker/file_server:ro" \
             ghcr.io/hermann-consult-development/owui-mcpo:${{ github.event_name == 'pull_request' && 'pr-validation' || github.ref_name }} \
-            -m unittest discover -s /tests -v
+            -c '/app/.venv/bin/python -m pip install --no-index --no-deps --find-links=/test-wheels --target=/tmp/hc-test-deps -r /tests/requirements.txt && /app/.venv/bin/python -m unittest discover -s /tests -v'
           docker run --rm --memory=4g --cpus=2 --network=none \
-            --entrypoint /app/.venv/bin/python -e PYTHONPATH=/rootPath \
+            --entrypoint /bin/sh -e PYTHONPATH=/tmp/hc-test-deps:/rootPath \
+            -v "$PWD/.test-wheels:/test-wheels:ro" \
             -e DOCS_TEMPLATE_DIR=/rootPath/templates \
             -v "$PWD/tests:/tests:ro" \
             -v "$PWD/LLM_Export/docker/file_server:/LLM_Export/docker/file_server:ro" \
             ghcr.io/hermann-consult-development/owui-mcpo:${{ github.event_name == 'pull_request' && 'pr-validation' || github.ref_name }} \
-            -m unittest discover -s /tests -v
+            -c '/app/.venv/bin/python -m pip install --no-index --no-deps --find-links=/test-wheels --target=/tmp/hc-test-deps -r /tests/requirements.txt && /app/.venv/bin/python -m unittest discover -s /tests -v'
       - name: Publish reviewed fixed tag
         if: startsWith(github.ref, 'refs/tags/')
         run: docker push ghcr.io/hermann-consult-development/${{ matrix.image }}:${{ github.ref_name }}
