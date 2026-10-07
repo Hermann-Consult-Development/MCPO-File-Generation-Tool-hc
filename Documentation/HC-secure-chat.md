@@ -26,7 +26,7 @@ are not the secure chat deployment path.
 `dockerfile.chat` preserves the immutable previously deployed HC MCPO runtime
 and applies separately pinned parser/runtime security corrections. The normal
 legacy Dockerfiles remain separate. The tag-only HC workflow builds
-`owui-mcpo:v0.8.1-hc.1` and `owui-file-export-server:v0.8.1-hc.1`; it does not
+`owui-mcpo:v0.8.1-hc.2` and `owui-file-export-server:v0.8.1-hc.2`; it does not
 publish `latest` or a legacy SSE image. PR builds do not publish. Record the
 qualified image digests in the central infra release catalog before release.
 
@@ -44,6 +44,34 @@ All nine focused tests also pass with the image's default packaged templates,
 in addition to the blank-template fixtures. The XLSX template places its table
 below branded headings; validation checks preserved content rather than
 assuming the first data row is always row 2.
+
+### Artifact fidelity correction in hc.2
+
+Deeper artifact acceptance found that the packaged XLSX template inserts the
+input grid at B5 but hc.1 left formulas pointing at their old A1-based positions.
+A real spreadsheet recalculation produced zero and `#VALUE!` instead of the
+requested totals. Formulas now move with the supplied grid: local A1 references,
+including `$` anchors and explicitly qualified references to the output sheet,
+are relocated. References to existing other sheets remain unchanged because
+this tool does not move those sheets. Quoted text remains text. Missing sheets,
+named/structured ranges, `INDIRECT`, external workbooks and multi-sheet ranges
+return an explicit error. Only one supplied grid is supported. Cached formula
+values are not invented; a spreadsheet application calculates them when opened.
+
+The PDF renderer now splits tall table rows across pages, repeats the header,
+and fits tables within the A4 text frame. A remaining layout error returns a
+failed operation without uploading a replacement document. Previously, an
+oversized cell could produce a successful download containing only `Error in
+PDF generation`. DOCX table borders are inserted in valid OOXML element order;
+the previous placement failed schema validation even though LibreOffice opened it.
+
+`tests/test_artifact_fidelity.py` adds actual workbook/PDF/DOCX regressions.
+The test-only `pypdf` dependency is downloaded on the CI runner, then installed
+into a temporary test directory inside the network-disabled container; it is
+not added to the product image. Re-run the existing authorization tests as well
+as these artifact checks with blank and packaged templates. Opening, rendering
+and recalculating in a compatible Office viewer remain separate acceptance
+checks; a correct MIME type or successful upload does not prove file fidelity.
 
 The first dependency scan of the fixed predecessor found 2 critical and 37
 high Python findings. The targeted corrections remove the directly used
