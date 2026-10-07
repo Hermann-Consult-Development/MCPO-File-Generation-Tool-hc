@@ -1,0 +1,7 @@
+FROM ghcr.io/hermann-consult-development/owui-file-export-server@sha256:ddfb7271184d44c1c85ca3e29c1818478f9f2f9072eac19cf1d441be6869e3cc
+COPY file_export_server.py /app/file_export_server.py
+ENV REQUIRE_USER_AUTH=true
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.version="0.8.1-hc.1" \
+      org.opencontainers.image.source="https://github.com/Hermann-Consult-Development/MCPO-File-Generation-Tool-hc" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}"
