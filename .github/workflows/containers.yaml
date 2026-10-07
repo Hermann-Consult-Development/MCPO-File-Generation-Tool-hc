@@ -3,7 +3,7 @@ name: Build & Push GHCR images
 on:
   push:
     branches: [ master, main, dev, alpha, beta, release-candidate ]
-    tags: [ 'v*' ]
+    tags: [ 'v*', '!v*-hc.*' ]
   workflow_dispatch:
 
 permissions:

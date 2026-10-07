@@ -1,0 +1,10 @@
+# Targeted fixed runtime/parser versions identified by the 2026-10-07 scan.
+# The predecessor otherwise retains its tested dependency graph.
+PyJWT==2.15.1
+anyio==4.14.2
+lxml==6.1.0
+Pillow==12.3.0
+py7zr==1.1.3
+python-multipart==0.0.30
+soupsieve==2.8.4
+urllib3==2.8.0

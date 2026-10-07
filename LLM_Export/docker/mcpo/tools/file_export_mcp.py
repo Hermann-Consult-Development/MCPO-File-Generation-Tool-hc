@@ -1,4 +1,6 @@
 import re
+from functools import wraps
+from contextvars import ContextVar
 import os
 import ast
 import csv
@@ -15,7 +17,7 @@ import zipfile
 import py7zr
 import logging
 import requests
-from requests import get, post
+from .file_security import REQUIRE_USER_AUTH, safe_filename, safe_join, user_token as _user_token, file_id as checked_file_id, http_get, http_post, public_error, validate_generated_content
 from requests.auth import HTTPBasicAuth
 import threading
 import markdown2
@@ -48,12 +50,31 @@ from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from reportlab.lib.units import mm, inch
 
-SCRIPT_VERSION = "0.8.1"
+SCRIPT_VERSION = "0.8.1-hc.1"
 
 URL = os.getenv('OWUI_URL')
 TOKEN = os.getenv('JWT_SECRET') ## will be deleted in 1.0.0
+_tool_folders = ContextVar("tool_folders", default=None)
 
-PERSISTENT_FILES = os.getenv("PERSISTENT_FILES", "false")
+
+def _tool_boundary(function):
+    """Keep library errors from exposing paths or remote credentials to a chat."""
+    @wraps(function)
+    async def guarded(*args, **kwargs):
+        folders = []
+        marker = _tool_folders.set(folders)
+        try:
+            return await function(*args, **kwargs)
+        except Exception as exc:
+            return {"success": False, "error": {"message": public_error(exc)}}
+        finally:
+            if REQUIRE_USER_AUTH:
+                for folder in folders:
+                    shutil.rmtree(folder, ignore_errors=True)
+            _tool_folders.reset(marker)
+    return guarded
+
+PERSISTENT_FILES = os.getenv("PERSISTENT_FILES", "false").lower() == "true"
 FILES_DELAY = int(os.getenv("FILES_DELAY", 60)) 
 
 EXPORT_DIR_ENV = os.getenv("FILE_EXPORT_DIR")
@@ -174,7 +195,7 @@ def search_local_sd(query: str):
     try:
         url = f"{SD_URL}/sdapi/v1/txt2img"
         log.debug(f"Sending request to local SD API at {url}")
-        response = requests.post(
+        response = http_post(
             url,
             json=payload,
             headers={"Content-Type": "application/json"},
@@ -193,8 +214,8 @@ def search_local_sd(query: str):
         image_data = base64.b64decode(image_b64)
 
         folder_path = _generate_unique_folder()
-        filename = f"{query.replace(' ', '_')}.png"
-        filepath = os.path.join(folder_path, filename)
+        filename = f"image_{uuid.uuid4().hex}.png"
+        filepath = safe_join(folder_path, filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
         with open(filepath, "wb") as f:
@@ -226,7 +247,7 @@ def search_unsplash(query):
     headers = {"Authorization": f"Client-ID {api_key}"}
     log.debug(f"Sending request to Unsplash API")
     try:
-        response = requests.get(url, params=params, headers=headers)
+        response = http_get(url, params=params, headers=headers)
         log.debug(f"Unsplash API response status: {response.status_code}")
         response.raise_for_status() 
         data = response.json()
@@ -259,7 +280,7 @@ def search_pexels(query):
     headers = {"Authorization": f"{api_key}"}
     log.debug(f"Sending request to Pexels API")
     try:
-        response = requests.get(url, params=params, headers=headers)
+        response = http_get(url, params=params, headers=headers)
         log.debug(f"Pexels API response status: {response.status_code}")
         response.raise_for_status() 
         data = response.json()
@@ -317,17 +338,20 @@ def _generate_unique_folder() -> str:
     folder_name = f"export_{uuid.uuid4().hex[:10]}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     folder_path = os.path.join(EXPORT_DIR, folder_name)
     os.makedirs(folder_path, exist_ok=True)
+    folders = _tool_folders.get()
+    if folders is not None:
+        folders.append(folder_path)
     return folder_path
 
 def _generate_filename(folder_path: str, ext: str, filename: str = None) -> tuple[str, str]:
     if not filename:
         filename = f"export_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
     base, ext = os.path.splitext(filename)
-    filepath = os.path.join(folder_path, filename)
+    filepath = safe_join(folder_path, filename)
     counter = 1
     while os.path.exists(filepath):
         filename = f"{base}_{counter}{ext}"
-        filepath = os.path.join(folder_path, filename)
+        filepath = safe_join(folder_path, filename)
         counter += 1
     return filepath, filename
 
@@ -474,7 +498,7 @@ def render_html_elements(soup):
                         try:
                             if src and src.startswith("http"):
                                 log.debug(f"Downloading image from URL: {src}")
-                                response = requests.get(src)
+                                response = http_get(src)
                                 response.raise_for_status()
                                 img_data = BytesIO(response.content)
                                 img = ReportLabImage(img_data, width=200, height=150)  # ✅ CORRIGÉ
@@ -614,7 +638,7 @@ def render_html_elements(soup):
                             image_url = search_image(query)
                             if image_url:
                                 log.debug(f"Downloading image from Unsplash URL: {image_url}")
-                                response = requests.get(image_url)
+                                response = http_get(image_url)
                                 log.debug(f"Image download response status: {response.status_code}")
                                 response.raise_for_status()
                                 img_data = BytesIO(response.content)
@@ -628,7 +652,7 @@ def render_html_elements(soup):
                                 story.append(Spacer(1, 6))
                         elif src.startswith("http"):
                             log.debug(f"Downloading image from direct URL: {src}")
-                            response = requests.get(src)
+                            response = http_get(src)
                             log.debug(f"Image download response status: {response.status_code}")
                             response.raise_for_status()
                             img_data = BytesIO(response.content)
@@ -732,7 +756,7 @@ def _create_excel(data: list[list[str]], filename: str, folder_path: str | None 
         folder_path = _generate_unique_folder()
     
     if filename:
-        filepath = os.path.join(folder_path, filename)
+        filepath = safe_join(folder_path, filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         fname = filename
     else:
@@ -778,7 +802,7 @@ def _create_excel(data: list[list[str]], filename: str, folder_path: str | None 
 
     if not data:
         wb.save(filepath)
-        return {"success": True, "filepath": filepath, "filename": filename}
+        return {"url": _public_url(folder_path, fname), "path": filepath}
 
     template_border = ws.cell(start_row, start_col).border
     has_borders = template_border and any([template_border.top.style, template_border.bottom.style, 
@@ -819,7 +843,7 @@ def _create_csv(data: list[list[str]], filename: str, folder_path: str | None = 
         folder_path = _generate_unique_folder()
 
     if filename:
-        filepath = os.path.join(folder_path, filename)
+        filepath = safe_join(folder_path, filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         fname = filename
     else:
@@ -838,7 +862,7 @@ def _create_pdf(text: str | list[str], filename: str, folder_path: str | None = 
     if folder_path is None:
         folder_path = _generate_unique_folder()
     if filename:
-        filepath = os.path.join(folder_path, filename)
+        filepath = safe_join(folder_path, filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         fname = filename
     else:
@@ -909,7 +933,7 @@ def _create_presentation(slides_data: list[dict], filename: str, folder_path: st
     if folder_path is None:
         folder_path = _generate_unique_folder()
     if filename:
-        filepath = os.path.join(folder_path, filename)
+        filepath = safe_join(folder_path, filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         fname = filename
     else:
@@ -1064,7 +1088,7 @@ def _create_presentation(slides_data: list[dict], filename: str, folder_path: st
                 log.debug(f"Searching for image query: '{image_query}'")
                 try:
                     log.debug(f"Downloading image from URL: {image_url}")
-                    response = requests.get(image_url, timeout=30)
+                    response = http_get(image_url, timeout=30)
                     response.raise_for_status()
                     image_data = response.content
                     image_stream = BytesIO(image_data)
@@ -1185,7 +1209,7 @@ def _create_word(content: list[dict] | str, filename: str, folder_path: str | No
     if folder_path is None:
         folder_path = _generate_unique_folder()
     if filename:
-        filepath = os.path.join(folder_path, filename)
+        filepath = safe_join(folder_path, filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         fname = filename
     else:
@@ -1249,7 +1273,7 @@ def _create_word(content: list[dict] | str, filename: str, folder_path: str | No
                     log.debug(f"Image search for the query : {image_query}")
                     image_url = search_image(image_query)
                     if image_url:
-                        response = requests.get(image_url)
+                        response = http_get(image_url)
                         image_data = BytesIO(response.content)
                         doc.add_picture(image_data, width=Inches(6))
                         log.debug("Image successfully added")
@@ -1334,7 +1358,7 @@ def _create_word(content: list[dict] | str, filename: str, folder_path: str | No
                         log.debug(f"Image search for the query : {image_query}")
                         image_url = search_image(image_query)
                         if image_url:
-                            response = requests.get(image_url)
+                            response = http_get(image_url)
                             image_data = BytesIO(response.content)
                             doc.add_picture(image_data, width=Inches(6))
                             log.debug("Image successfully added")
@@ -1408,7 +1432,7 @@ def _create_raw_file(content: str, filename: str | None, folder_path: str | None
         folder_path = _generate_unique_folder()
 
     if filename:
-        filepath = os.path.join(folder_path, filename)
+        filepath = safe_join(folder_path, filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         fname = filename
     else:
@@ -1426,6 +1450,10 @@ def upload_file(file_path: str, filename: str, file_type: str, token: str) -> di
     """
     Upload a file to OpenWebUI server.
     """
+    token = _user_token({"authorization": token}, TOKEN)
+    filename = safe_filename(filename)
+    if file_type and not filename.lower().endswith("." + file_type.lower()):
+        filename = safe_filename(filename + "." + file_type)
     url = f"{URL}/api/v1/files/"
     headers = {
         'Authorization': token,
@@ -1433,28 +1461,36 @@ def upload_file(file_path: str, filename: str, file_type: str, token: str) -> di
     }
     
     with open(file_path, 'rb') as f:
-        files = {'file': f}
-        response = post(url, headers=headers, files=files)
+        files = {'file': (filename, f, 'application/octet-stream')}
+        response = http_post(url, headers=headers, files=files, params={"process": "false"})
 
-    if response.status_code != 200:
-        return {"error": {"message": f'Error uploading file: {response.status_code}'}}
+    if response.status_code not in (200, 201):
+        return {"success": False, "error": {"message": f'File upload rejected (HTTP {response.status_code})'}}
     else:
+        uploaded_id = checked_file_id(response.json().get('id'))
+        link = f"/api/v1/files/{uploaded_id}/content"
         return {
-            "file_path_download": f"[Download {filename}.{file_type}](/api/v1/files/{response.json()['id']}/content)"
+            "success": True, "file_id": uploaded_id, "url": link,
+            "file_path_download": f"[Download {filename}]({link})"
         }
+
+
+def _forwarded_token(mcpo_headers):
+    return _user_token(mcpo_headers, TOKEN)
 
 def download_file(file_id: str, token: str) -> BytesIO:
     """
     Download a file from OpenWebUI server.
     """
    
-    url = f"{URL}/api/v1/files/{file_id}/content"
+    token = _user_token({"authorization": token}, TOKEN)
+    url = f"{URL}/api/v1/files/{checked_file_id(file_id)}/content"
     headers = {
         'Authorization': token,
         'Accept': 'application/json'
     }
     
-    response = get(url, headers=headers)
+    response = http_get(url, headers=headers)
     
     if response.status_code != 200:
         return {"error": {"message": f'Error downloading the file: {response.status_code}'}}
@@ -1576,6 +1612,7 @@ def _apply_run_formatting(run, format_dict):
     description="Return the structure, content, and metadata of a document based on its type (docx, xlsx, pptx). Unified output format with index, type, style, and text."
 )
 
+@_tool_boundary
 async def full_context_document(
     file_id: str,
     file_name: str,
@@ -1588,16 +1625,8 @@ async def full_context_document(
     Returns:
         dict: A JSON object with the structure of the document.
     """
-    user_token = TOKEN
-    if mcpo_headers:
-        auth_header = mcpo_headers.get("authorization")
-        if auth_header:
-            user_token = auth_header
-            logging.info("Using authorization from MCPO forwarded headers")
-        else:
-            logging.warning("Forwarded headers present but no authorization found")
-    else:
-        logging.info("ℹNo forwarded headers, using admin TOKEN fallback")
+    safe_filename(file_name)
+    user_token = _forwarded_token(mcpo_headers)
     try:
         user_file = download_file(file_id=file_id,token=user_token) 
 
@@ -1786,7 +1815,7 @@ async def full_context_document(
         return json.dumps(structure, indent=4, ensure_ascii=False)
 
     except Exception as e:
-        return json.dumps({"error": {"message": str(e)}}, indent=4, ensure_ascii=False)
+        return json.dumps({"error": {"message": public_error(e)}}, indent=4, ensure_ascii=False)
 
 def add_auto_sized_review_comment(cell, text, author="AI Reviewer"):
     """
@@ -2117,6 +2146,7 @@ def _set_table_from_matrix(shape, data):
             tbl.cell(r, c).text = "" if val is None else str(val)
 
 @mcp.tool()
+@_tool_boundary
 async def edit_document(
     file_id: str,
     file_name: str,
@@ -2178,18 +2208,9 @@ async def edit_document(
     - Formatting is preserved.
     - Returns a download link to the edited file.
     """
-    temp_folder = f"/app/temp/{uuid.uuid4()}"
-    os.makedirs(temp_folder, exist_ok=True)
-    user_token = TOKEN
-    if mcpo_headers:
-        auth_header = mcpo_headers.get("authorization")
-        if auth_header:
-            user_token = auth_header
-            logging.info("✅ Using authorization from MCPO forwarded headers")
-        else:
-            logging.warning("⚠️ Forwarded headers present but no authorization found")
-    else:
-        logging.info("ℹ️ No forwarded headers, using admin TOKEN fallback")
+    safe_filename(file_name)
+    user_token = _forwarded_token(mcpo_headers)
+    temp_folder = tempfile.mkdtemp(prefix="hc-file-edit-")
     try:
         user_file = download_file(file_id, token=user_token)
         if isinstance(user_file, dict) and "error" in user_file:
@@ -2564,7 +2585,7 @@ async def edit_document(
     except Exception as e:
         shutil.rmtree(temp_folder, ignore_errors=True)
         return json.dumps(
-            {"error": {"message": str(e)}},
+            {"error": {"message": public_error(e)}},
             indent=4,
             ensure_ascii=False
         )
@@ -2737,6 +2758,7 @@ def _add_native_pptx_comment_zip(pptx_path, slide_num, comment_text, author_id, 
     title="Review and comment on various document types",
     description="Review an existing document of various types (docx, xlsx, pptx), perform corrections and add comments."
 )
+@_tool_boundary
 async def review_document(
     file_id: str,
     file_name: str,
@@ -2762,18 +2784,9 @@ async def review_document(
     - The index should be a slide ID in the format "sid:<slide_id>"
     - These correspond to the "id_key" field returned by the full_context_document() function
     """
-    temp_folder = f"/app/temp/{uuid.uuid4()}"
-    os.makedirs(temp_folder, exist_ok=True)
-    user_token = TOKEN
-    if mcpo_headers:
-        auth_header = mcpo_headers.get("authorization")
-        if auth_header:
-            user_token = auth_header
-            logging.info("✅ Using authorization from MCPO forwarded headers")
-        else:
-            logging.warning("⚠️ Forwarded headers present but no authorization found")
-    else:
-        logging.info("ℹ️ No forwarded headers, using admin TOKEN fallback")
+    safe_filename(file_name)
+    user_token = _forwarded_token(mcpo_headers)
+    temp_folder = tempfile.mkdtemp(prefix="hc-file-edit-")
     try:
         user_file = download_file(file_id, token=user_token)
         if isinstance(user_file, dict) and "error" in user_file:
@@ -2990,20 +3003,25 @@ async def review_document(
     except Exception as e:
         shutil.rmtree(temp_folder, ignore_errors=True)
         return json.dumps(
-            {"error": {"message": str(e)}},
+            {"error": {"message": public_error(e)}},
             indent=4,
             ensure_ascii=False
         )
 
 @mcp.tool()
-async def create_file(data: dict, persistent: bool = PERSISTENT_FILES) -> dict:
+@_tool_boundary
+async def create_file(data: dict, persistent: bool = PERSISTENT_FILES, mcpo_headers: dict = None) -> dict:
     """ "{"data": {"format":"pdf","filename":"report.pdf","content":[{"type":"title","text":"..."},{"type":"paragraph","text":"..."}],"title":"..."}}
 "{"data": {"format":"docx","filename":"doc.docx","content":[{"type":"title","text":"..."},{"type":"list","items":[...]}],"title":"..."}}"
 "{"data": {"format":"pptx","filename":"slides.pptx","slides_data":[{"title":"...","content":[...],"image_query":"...","image_position":"left|right|top|bottom","image_size":"small|medium|large"}],"title":"..."}}"
 "{"data": {"format":"xlsx","filename":"data.xlsx","content":[["Header1","Header2"],["Val1","Val2"]],"title":"..."}}"
 "{"data": {"format":"csv","filename":"data.csv","content":[[...]]}}"
 "{"data": {"format":"txt|xml|py|etc","filename":"file.ext","content":"string"}}" """
-    log.debug("Creating file via tool")
+    token = _forwarded_token(mcpo_headers)
+    validate_generated_content(data)
+    filename = data.get("filename")
+    if filename: safe_filename(filename)
+    if not re.fullmatch(r"[a-zA-Z0-9]*", data.get("format") or ""): raise ValueError("Invalid file format")
     folder_path = _generate_unique_folder()
     format_type = (data.get("format") or "").lower()
     filename = data.get("filename")
@@ -3024,15 +3042,28 @@ async def create_file(data: dict, persistent: bool = PERSISTENT_FILES) -> dict:
         use_filename = filename or f"export.{format_type or 'txt'}"
         result = _create_raw_file(content if content is not None else "", use_filename, folder_path=folder_path)
 
-    if not persistent:
+    if not persistent and not REQUIRE_USER_AUTH:
         _cleanup_files(folder_path, FILES_DELAY)
 
+    if REQUIRE_USER_AUTH:
+        try:
+            return upload_file(result["path"], os.path.basename(result["path"]), "", token)
+        except Exception as exc:
+            return {"success": False, "error": {"message": public_error(exc)}}
+        finally:
+            shutil.rmtree(folder_path, ignore_errors=True)
     return {"url": result["url"]}
 
 @mcp.tool()
-async def generate_and_archive(files_data: list[dict], archive_format: str = "zip", archive_name: str = None, persistent: bool = PERSISTENT_FILES) -> dict:
+@_tool_boundary
+async def generate_and_archive(files_data: list[dict], archive_format: str = "zip", archive_name: str = None, persistent: bool = PERSISTENT_FILES, mcpo_headers: dict = None) -> dict:
     """files_data=[{"format":"pdf","filename":"report.pdf","content":[{"type":"title","text":"..."},{"type":"paragraph","text":"..."}],"title":"..."},{"format":"docx","filename":"doc.docx","content":[{"type":"title","text":"..."},{"type":"list","items":[...]}],"title":"..."},{"format":"pptx","filename":"slides.pptx","slides_data":[{"title":"...","content":[...],"image_query":"...","image_position":"left|right|top|bottom","image_size":"small|medium|large"}],"title":"..."},{"format":"xlsx","filename":"data.xlsx","content":[["Header1","Header2"],["Val1","Val2"]],"title":"..."},{"format":"csv","filename":"data.csv","content":[[...]]},{"format":"txt|xml|py|etc","filename":"file.ext","content":"string"}]"""
-    log.debug("Generating archive via tool")
+    token = _forwarded_token(mcpo_headers)
+    validate_generated_content(files_data)
+    if archive_name: safe_filename(archive_name)
+    for item in files_data or []:
+        if item.get("filename"): safe_filename(item["filename"])
+        if not re.fullmatch(r"[a-zA-Z0-9]*", item.get("format") or ""): raise ValueError("Invalid file format")
     folder_path = _generate_unique_folder()
     generated_paths: list[str] = []
 
@@ -3065,7 +3096,7 @@ async def generate_and_archive(files_data: list[dict], archive_format: str = "zi
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     archive_basename = f"{archive_name or 'archive'}_{timestamp}"
     archive_filename = f"{archive_basename}.zip" if archive_format.lower() not in ("7z", "tar.gz") else f"{archive_basename}.{archive_format}"
-    archive_path = os.path.join(folder_path, archive_filename)
+    archive_path = safe_join(folder_path, archive_filename)
 
     if archive_format.lower() == "7z":
         with py7zr.SevenZipFile(archive_path, mode='w') as archive:
@@ -3080,9 +3111,16 @@ async def generate_and_archive(files_data: list[dict], archive_format: str = "zi
             for p in generated_paths:
                 zipf.write(p, os.path.relpath(p, folder_path))
 
-    if not persistent:
+    if not persistent and not REQUIRE_USER_AUTH:
         _cleanup_files(folder_path, FILES_DELAY)
 
+    if REQUIRE_USER_AUTH:
+        try:
+            return upload_file(archive_path, archive_filename, "", token)
+        except Exception as exc:
+            return {"success": False, "error": {"message": public_error(exc)}}
+        finally:
+            shutil.rmtree(folder_path, ignore_errors=True)
     return {"url": _public_url(folder_path, archive_filename)}
 
 if __name__ == "__main__":

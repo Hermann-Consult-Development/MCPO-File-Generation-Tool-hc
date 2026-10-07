@@ -1,0 +1,11 @@
+# Known HC MCPO predecessor; preserves its header-forwarding bridge behavior.
+FROM ghcr.io/hermann-consult-development/owui-mcpo@sha256:9753cab55ce66b6a2d0ca420fa604c8ca097aed7306ee41ca7d8fe12526df919
+
+COPY requirements.chat-security.txt /tmp/requirements.chat-security.txt
+RUN /app/.venv/bin/python -m pip install --no-cache-dir -r /tmp/requirements.chat-security.txt \
+ && /app/.venv/bin/python -m pip check
+
+COPY config.json /rootPath/config.json
+COPY tools /rootPath/tools
+ENV REQUIRE_USER_AUTH=true LOG_LEVEL=INFO
+LABEL org.opencontainers.image.version="0.8.1-hc.1"
