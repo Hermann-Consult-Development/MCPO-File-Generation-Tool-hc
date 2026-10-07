@@ -50,6 +50,13 @@ jobs:
             -v "$PWD/LLM_Export/docker/file_server:/LLM_Export/docker/file_server:ro" \
             ghcr.io/hermann-consult-development/owui-mcpo:${{ github.event_name == 'pull_request' && 'pr-validation' || github.ref_name }} \
             -m unittest discover -s /tests -v
+          docker run --rm --memory=4g --cpus=2 --network=none \
+            --entrypoint /app/.venv/bin/python -e PYTHONPATH=/rootPath \
+            -e DOCS_TEMPLATE_DIR=/rootPath/templates \
+            -v "$PWD/tests:/tests:ro" \
+            -v "$PWD/LLM_Export/docker/file_server:/LLM_Export/docker/file_server:ro" \
+            ghcr.io/hermann-consult-development/owui-mcpo:${{ github.event_name == 'pull_request' && 'pr-validation' || github.ref_name }} \
+            -m unittest discover -s /tests -v
       - name: Publish reviewed fixed tag
         if: startsWith(github.ref, 'refs/tags/')
         run: docker push ghcr.io/hermann-consult-development/${{ matrix.image }}:${{ github.ref_name }}

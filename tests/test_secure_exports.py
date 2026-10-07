@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import zipfile
 
 os.environ.update(REQUIRE_USER_AUTH="true", FILE_EXPORT_DIR=tempfile.mkdtemp(),
-                  DOCS_TEMPLATE_DIR="/missing-test-templates", OWUI_URL="http://webui:8080",
+                  DOCS_TEMPLATE_DIR=os.getenv("DOCS_TEMPLATE_DIR", "/missing-test-templates"), OWUI_URL="http://webui:8080",
                   JWT_SECRET="admin-fallback-must-never-be-used")
 from tools import file_export_mcp as tool
 from tools import file_security as security
@@ -33,7 +33,9 @@ def validate_artifact(kind, raw):
     if kind == "docx":
         assert "HC export" in " ".join(p.text for p in Document(io.BytesIO(raw)).paragraphs)
     elif kind == "xlsx":
-        assert load_workbook(io.BytesIO(raw)).active.cell(2, 1).value == "HC export"
+        # Packaged templates may start the table below their branded heading.
+        sheet = load_workbook(io.BytesIO(raw)).active
+        assert any(cell.value == "HC export" for row in sheet.iter_rows() for cell in row)
     elif kind == "pptx":
         slides = Presentation(io.BytesIO(raw)).slides
         # Existing renderer creates its cover plus one supplied content slide.

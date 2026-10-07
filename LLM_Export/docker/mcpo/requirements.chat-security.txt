@@ -2,6 +2,8 @@
 # The predecessor otherwise retains its tested dependency graph.
 PyJWT==2.15.1
 anyio==4.14.2
+cryptography==50.0.2
+mcp==1.28.1
 lxml==6.1.0
 Pillow==12.3.0
 py7zr==1.1.3

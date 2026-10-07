@@ -40,6 +40,10 @@ Initial remote qualification on 2026-10-07 produced real files in all five
 formats, including German filenames: owner download 200, other HC test user
 404, anonymous 401 for every artifact; unauthenticated generation denied.
 This is file/API qualification, not a claim of full customer workflow approval.
+All nine focused tests also pass with the image's default packaged templates,
+in addition to the blank-template fixtures. The XLSX template places its table
+below branded headings; validation checks preserved content rather than
+assuming the first data row is always row 2.
 
 The first dependency scan of the fixed predecessor found 2 critical and 37
 high Python findings. The targeted corrections remove the directly used
@@ -48,16 +52,15 @@ py7zr and soupsieve. `pip check` and real five-format qualification are required
 after these corrections. PyJWT is pinned to 2.15.1, including follow-up fixes
 beyond the scanner's original 2.14.0 floor.
 
-The scan is **not clean**. The first corrected runtime scan retained 9 high
-Python findings in cryptography, MCP and Starlette, plus inherited OS and
-Node/npm findings. The flagged MCP HTTP/WebSocket/task transports are not used:
-the configured file tool is a stdio child behind MCPO. Starlette's flagged
-Windows StaticFiles and form parsing paths are not used by these Linux JSON
-tool routes. This service does not decrypt PKCS#7 or perform custom X.509 path
-validation; those cryptography paths are outside this file workflow. However,
-the cryptography wheel's bundled OpenSSL and inherited OS libraries still need
-release-owner review; absence of a demonstrated call path is not proof of
-non-exploitability. Node/npm archive tools are not invoked by the fixed Python
+The scan is **not clean**. A follow-up correction also pins cryptography50.0.2
+and MCP1.28.1; dependency checks, nine tests and actual five-format user-owned
+downloads pass with the default packaged templates after that change.
+The final scan retains Starlette findings plus inherited OS and Node/npm
+findings. Starlette's flagged Windows StaticFiles and form parsing paths are
+not used by these Linux JSON tool routes. A major Starlette/FastAPI transition
+is outside this bounded change. Inherited OS libraries still need release-owner
+review; absence of a demonstrated call path is not proof of non-exploitability.
+Node/npm archive tools are not invoked by the fixed Python
 tool configuration. Archive generation/editing uses Python's zipfile/tarfile,
 not Node tar. The OS scanner also reports SQLite and minizip-related zlib
 findings without a Debian fixed version. These are recorded rather than hidden
