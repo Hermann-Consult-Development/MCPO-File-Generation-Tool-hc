@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import ExitStack
 import copy
+import io
 import unittest
 from unittest.mock import Mock, patch
 
@@ -64,6 +65,32 @@ class FileInputContract(unittest.TestCase):
                            ("docx", {"type": "invented", "text": "Must not disappear"})]:
             with self.subTest(fmt=fmt):
                 self.assert_rejected_without_output({"format": fmt, "content": [block]}, "Unsupported")
+
+    def test_docx_list_strings_and_untyped_text_are_preserved(self):
+        from docx import Document
+        uploaded = []
+        def upload(url, **kwargs):
+            uploaded.append(kwargs["files"]["file"][1].read())
+            return Mock(status_code=200, json=lambda: {"id": "docx-list-strings"})
+        content = [
+            {"type": "bullet", "items": "Bullet as one string"},
+            {"type": "list", "items": "List as one string"},
+            {"text": "Legacy untyped text"},
+        ]
+        with patch.object(tool, "http_post", upload):
+            result = asyncio.run(tool.create_file({"format": "docx", "content": content}, mcpo_headers=HEADERS))
+        self.assertTrue(result["success"], result)
+        self.assertEqual(len(uploaded), 1)
+        paragraphs = [p.text for p in Document(io.BytesIO(uploaded[0])).paragraphs]
+        for text in ["Bullet as one string", "List as one string", "Legacy untyped text"]:
+            self.assertEqual(paragraphs.count(text), 1)
+
+    def test_explicit_null_block_type_fails_before_generation(self):
+        for fmt in ["docx", "pdf"]:
+            data = {"format": fmt, "content": [{"type": None, "text": "Must not disappear"}]}
+            with self.subTest(fmt=fmt):
+                self.assert_rejected_without_output(data, "block type must be a string")
+                self.assert_rejected_without_output(data, "block type must be a string", archive=True)
 
     def test_archive_validates_all_files_before_generating_the_first(self):
         self.assert_rejected_without_output({"data": {"format": "xlsx", "content": [[1]]}},

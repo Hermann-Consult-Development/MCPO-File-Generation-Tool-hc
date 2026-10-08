@@ -38,13 +38,15 @@ def _document(content, fmt):
         if not isinstance(item, dict):
             raise ValueError("document blocks must be strings or objects")
         kind = item.get("type")
-        if kind is not None and not isinstance(kind, str):
+        if "type" in item and not isinstance(kind, str):
             raise ValueError("document block type must be a string")
-        if kind in text_types or (fmt == "docx" and kind is None and "text" in item):
+        if kind in text_types or (fmt == "docx" and "type" not in item and "text" in item):
             if not isinstance(item.get("text"), str):
                 raise ValueError("text blocks require a text string")
         elif kind == "list" or (fmt == "docx" and kind == "bullet"):
             items = item.get("items", [item.get("text")] if fmt == "docx" else None)
+            if fmt == "docx" and isinstance(items, str):
+                items = [items]
             if not isinstance(items, list) or any(not isinstance(x, str) for x in items):
                 raise ValueError("list blocks require an items list of strings")
         elif kind == "table":
