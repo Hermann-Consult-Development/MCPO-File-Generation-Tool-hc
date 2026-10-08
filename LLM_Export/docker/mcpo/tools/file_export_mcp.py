@@ -19,6 +19,7 @@ import logging
 import requests
 from .file_security import REQUIRE_USER_AUTH, FilePolicyError, safe_filename, safe_join, user_token as _user_token, file_id as checked_file_id, http_get, http_post, public_error, validate_generated_content
 from .spreadsheet_formulas import relocate_formula
+from .file_input import FileInput, validate_file_input
 from requests.auth import HTTPBasicAuth
 import threading
 import markdown2
@@ -3018,13 +3019,14 @@ async def review_document(
 
 @mcp.tool()
 @_tool_boundary
-async def create_file(data: dict, persistent: bool = PERSISTENT_FILES, mcpo_headers: dict = None) -> dict:
-    """ "{"data": {"format":"pdf","filename":"report.pdf","content":[{"type":"title","text":"..."},{"type":"paragraph","text":"..."}],"title":"..."}}
-"{"data": {"format":"docx","filename":"doc.docx","content":[{"type":"title","text":"..."},{"type":"list","items":[...]}],"title":"..."}}"
-"{"data": {"format":"pptx","filename":"slides.pptx","slides_data":[{"title":"...","content":[...],"image_query":"...","image_position":"left|right|top|bottom","image_size":"small|medium|large"}],"title":"..."}}"
-"{"data": {"format":"xlsx","filename":"data.xlsx","content":[["Header1","Header2"],["Val1","Val2"]],"title":"..."}}"
-"{"data": {"format":"csv","filename":"data.csv","content":[[...]]}}"
-"{"data": {"format":"txt|xml|py|etc","filename":"file.ext","content":"string"}}"
+async def create_file(data: FileInput, persistent: bool = PERSISTENT_FILES, mcpo_headers: dict = None) -> dict:
+    """Create one file. Supply exactly one data wrapper in the tool arguments.
+Example: {"data":{"format":"xlsx","filename":"costs.xlsx","content":[["Cost",10]]}}
+Put format/filename/content directly inside data; never use data.data or schema keys.
+PDF/DOCX content is text or document blocks (title, subtitle, paragraph, list, table).
+DOCX also supports heading, subheading, bold, bullet and numbered blocks.
+PPTX example: {"data":{"format":"pptx","slides_data":[{"title":"Update","content":["First point"]}]}}
+CSV uses rows like XLSX. Raw text formats (txt, xml, json, py, etc.) require a string.
 XLSX supplies one rectangular grid starting at logical A1. A1 formulas (including
 $ anchors and explicit references to the output sheet) move with that grid when
 a template places it elsewhere. Existing other sheets are not moved. Named or
@@ -3033,6 +3035,7 @@ and return an error. Formula results are calculated when opened in a spreadsheet
 application; this tool does not fabricate cached values.
 """
     token = _forwarded_token(mcpo_headers)
+    data = validate_file_input(data)
     validate_generated_content(data)
     filename = data.get("filename")
     if filename: safe_filename(filename)
@@ -3071,9 +3074,10 @@ application; this tool does not fabricate cached values.
 
 @mcp.tool()
 @_tool_boundary
-async def generate_and_archive(files_data: list[dict], archive_format: str = "zip", archive_name: str = None, persistent: bool = PERSISTENT_FILES, mcpo_headers: dict = None) -> dict:
+async def generate_and_archive(files_data: list[FileInput], archive_format: str = "zip", archive_name: str = None, persistent: bool = PERSISTENT_FILES, mcpo_headers: dict = None) -> dict:
     """files_data=[{"format":"pdf","filename":"report.pdf","content":[{"type":"title","text":"..."},{"type":"paragraph","text":"..."}],"title":"..."},{"format":"docx","filename":"doc.docx","content":[{"type":"title","text":"..."},{"type":"list","items":[...]}],"title":"..."},{"format":"pptx","filename":"slides.pptx","slides_data":[{"title":"...","content":[...],"image_query":"...","image_position":"left|right|top|bottom","image_size":"small|medium|large"}],"title":"..."},{"format":"xlsx","filename":"data.xlsx","content":[["Header1","Header2"],["Val1","Val2"]],"title":"..."},{"format":"csv","filename":"data.csv","content":[[...]]},{"format":"txt|xml|py|etc","filename":"file.ext","content":"string"}]"""
     token = _forwarded_token(mcpo_headers)
+    files_data = [validate_file_input(item) for item in files_data]
     validate_generated_content(files_data)
     if archive_name: safe_filename(archive_name)
     for item in files_data or []:
