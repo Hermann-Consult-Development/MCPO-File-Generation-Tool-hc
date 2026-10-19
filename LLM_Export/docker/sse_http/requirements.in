@@ -1,0 +1,27 @@
+# Direct dependencies of tools/file_export_mcp.py. requirements.txt pins the
+# full resolved set; the image installs only that file.
+#
+# mcp stays on 1.x: mcp 2.0 removed mcp.server.fastmcp, which the server
+# imports. 1.28.1 is the version the MCPO image (requirements.chat-security.txt)
+# runs as well.
+#
+# To update: resolve this file in the base image of the dockerfile, e.g.
+#   docker run --rm -v "$PWD:/work" <base image> sh -c \
+#     'pip install -r /work/requirements.in && pip check && pip freeze --exclude pip --exclude setuptools --exclude wheel'
+# write the result to requirements.txt (keep its header) and let the CI probe
+# start the image before it is pushed.
+mcp==1.28.1
+uvicorn
+starlette
+requests
+python-docx
+python-pptx
+openpyxl
+reportlab
+beautifulsoup4
+markdown2
+emoji
+py7zr
+pillow
+lxml
+typing_extensions
