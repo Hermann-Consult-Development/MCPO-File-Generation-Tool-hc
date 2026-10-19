@@ -547,6 +547,8 @@ def _get_pinned(addresses, host, literal, target, deadline, label):
                 raise _too_large(label)
             try:
                 body = _read_capped(iter(lambda: response.read1(65536), b""), label, deadline)
+            except FilePolicyError:
+                raise  # the size limit; FilePolicyError is a ValueError
             except (urllib3.exceptions.HTTPError, http.client.HTTPException, OSError, ValueError):
                 raise _Unavailable("read failed") from None
             if watchdog.fired:

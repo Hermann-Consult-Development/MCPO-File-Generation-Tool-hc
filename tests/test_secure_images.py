@@ -157,14 +157,18 @@ def _handler(server):
                 self.send_header("Content-Length", str(images.MAX_BYTES + 1))
                 self.end_headers()
                 return
-            if path == "/big-chunked":
+            if path in ("/chunked.png", "/big-chunked"):
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
-                piece = b"\0" * 65536
+                if path == "/chunked.png":
+                    body = picture("PNG")
+                    pieces = [body[i:i + 100] for i in range(0, len(body), 100)]
+                else:
+                    pieces = [b"\0" * 65536] * (images.MAX_BYTES // 65536 + 4)
                 try:
-                    for _ in range(images.MAX_BYTES // len(piece) + 4):
+                    for piece in pieces:
                         self.wfile.write(b"%x\r\n%s\r\n" % (len(piece), piece))
                     self.wfile.write(b"0\r\n\r\n")
                 except OSError:
@@ -389,7 +393,7 @@ class PublicImages(unittest.TestCase):
 
     def test_formats_are_decoded_and_re_encoded(self):
         for path, ext in {"/ok.png": "png", "/photo.jpg": "jpeg", "/anim.gif": "png", "/pic.webp": "jpeg",
-                          "/pic.bmp": "png", "/octet": "png", "/alpha.png": "png"}.items():
+                          "/pic.bmp": "png", "/octet": "png", "/alpha.png": "png", "/chunked.png": "png"}.items():
             with self.subTest(path=path):
                 result = self.load("https://images.test" + path)
                 self.assertEqual(result.ext, ext)
@@ -571,6 +575,8 @@ class ImagesInDocuments(unittest.TestCase):
         self.refused({"format": "docx", "content": "Logo: ![x](/api/v1/files/own/content)"}, "its own image block or line")
         self.refused({"format": "docx", "content": [{"type": "image", "query": "cats", "url": "https://x.test/a.png"}]},
                      "exactly one of file_id, url or query")
+        self.refused({"format": "docx", "content": ["Text", {"type": "image", "file_id": "foreign"}]},
+                     "not found among your files")
 
     def test_pptx(self):
         raw = self.created({"format": "pptx", "slides_data": [
@@ -585,6 +591,8 @@ class ImagesInDocuments(unittest.TestCase):
                                                          "image_query": "cats"}]}, "one of image_file_id")
         self.refused({"format": "pptx", "slides_data": [{"title": "x", "content": ["y"], "image_url": "../x.png"}]},
                      "Local file paths")
+        self.refused({"format": "pptx", "slides_data": [{"title": "x", "content": ["y"], "image_file_id": "report"}]},
+                     "is not an image")
 
     def test_archive_with_images_uploads_once(self):
         result = asyncio.run(tool.generate_and_archive([
