@@ -14,20 +14,50 @@ disabled. MCPO header-debug logging is disabled. All tool-entry output names
 must be plain filenames, including archives, edits and reviews. Outbound HTTP
 requests have bounded timeouts and never follow redirects with credentials.
 
-Secure generation supports DOCX, PDF, XLSX, CSV and PPTX with text and tables.
-Embedded images and image search are explicitly rejected in this mode: the
-legacy PDF renderer reads local image paths and arbitrary network image URLs.
-A safe image-input policy is future work; omitted images are not reported as a
-complete successful export. Legacy SSE/Python entrypoints are unchanged and
-are not the secure chat deployment path.
+Secure generation supports DOCX, PDF, XLSX, CSV and PPTX with text, tables
+and images. Legacy SSE/Python entrypoints are unchanged and are not the secure
+chat deployment path.
+
+### Images (hc.4)
+
+Up to hc.3 this mode refused every image, because the legacy renderers read
+local image paths and arbitrary network URLs. Since hc.4 images come from four
+kinds of source only (`tools/secure_images.py`):
+
+1. The caller's own Open WebUI files: an image block with `file_id`, or an
+   `/api/v1/files/<id>/content` link. They are read through Open WebUI with the
+   forwarded token, and the file must belong to the caller; a file the caller
+   could only read through sharing or an admin role is refused.
+2. The configured image search (`IMAGE_SOURCE` `unsplash` or `pexels` with its
+   key). Results are fetched only from `images.unsplash.com` or
+   `images.pexels.com`. `local_sd` is not available in this mode. Unsplash's
+   attribution and download-tracking rules are not implemented.
+3. Public `https` URLs on port 443. Every address of the host must be public
+   (no private, loopback, link-local, shared, multicast or reserved ranges,
+   including IPv4 embedded in IPv6), on every redirect (at most three); the
+   connection goes to the checked address and the certificate is verified for
+   the host name. No credentials in URLs, no compressed bodies, no proxy.
+4. Inline `data:image/...;base64` images.
+
+Local paths and every other scheme are refused before anything is read. Each
+image is limited in size (`IMAGE_MAX_BYTES`, default 10 MB, and
+`IMAGE_MAX_TOTAL_BYTES`, 50 MB per tool call), number (`IMAGE_MAX_COUNT`, 20 per
+tool call) and time (`IMAGE_TIMEOUT`, 20 s in total; the connection is closed at
+the deadline). It is decoded only as PNG, JPEG, GIF, WebP or BMP within
+`IMAGE_MAX_PIXELS` (40 million) and re-encoded as PNG or JPEG (longest side at
+most 2400 px, metadata dropped) before it is placed. An image that cannot be
+used fails the whole file with a message that names it; images are never left
+out silently. For the same reason PDF images inside lists, tables, quotes or
+headings, and DOCX or PPTX images inside text, are refused with a hint where
+to put them.
 
 ## Qualification and release
 
 `dockerfile.chat` preserves the immutable previously deployed HC MCPO runtime
 and applies separately pinned parser/runtime security corrections. The normal
 legacy Dockerfiles remain separate. The tag-only HC workflow builds
-`owui-mcpo:v0.8.1-hc.2` and `owui-file-export-server:v0.8.1-hc.2`; it does not
-publish `latest` or a legacy SSE image. PR builds do not publish. Record the
+`owui-mcpo` and `owui-file-export-server` with the pushed tag (for example
+`v0.8.1-hc.4`); it does not publish `latest` or a legacy SSE image. PR builds do not publish. Record the
 qualified image digests in the central infra release catalog before release.
 
 Run `tests/test_secure_exports.py` only in an isolated test environment with

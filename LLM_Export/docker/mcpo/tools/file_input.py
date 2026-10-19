@@ -4,7 +4,7 @@ import math
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, ValidationError, model_validator
 
-from .file_security import FilePolicyError
+from .file_security import REQUIRE_USER_AUTH, FilePolicyError
 
 
 def _grid(value, *, rectangular=False, allow_empty=False):
@@ -55,8 +55,14 @@ def _document(content, fmt):
                 _grid([item["headers"]])
             else:
                 _grid(item.get("data"))
+        elif kind == "image" and REQUIRE_USER_AUTH:
+            # Which sources are allowed is decided by secure_images.
+            sources = [item.get(k) for k in ("file_id", "url", "query") if item.get(k) is not None]
+            if len(sources) != 1 or not isinstance(sources[0], str) or not sources[0].strip():
+                raise ValueError("image blocks need exactly one of file_id, url or query as a non-empty string")
+            if not isinstance(item.get("alt", ""), str):
+                raise ValueError("image alt text must be a string")
         elif kind in {"image", "image_query"}:
-            # Existing secure-export policy rejects these before any file write.
             if not isinstance(item.get("query"), str):
                 raise ValueError("image blocks require a query string")
         else:
@@ -105,6 +111,10 @@ class FileInput(BaseModel):
                     raise ValueError("slide content must be text or a list of text/items")
                 if isinstance(content, list) and any(not isinstance(x, (str, dict)) for x in content):
                     raise ValueError("slide content items must be strings or objects")
+                if REQUIRE_USER_AUTH:
+                    for key in ("image_file_id", "image_url", "image_query", "image_position", "image_size"):
+                        if slide.get(key) is not None and not isinstance(slide[key], str):
+                            raise ValueError(f"slide {key} must be a string")
         else:
             if self.slides_data is not None:
                 raise ValueError("slides_data is only supported for PPTX")
