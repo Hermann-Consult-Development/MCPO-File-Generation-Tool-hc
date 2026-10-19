@@ -13,21 +13,6 @@ class FilePolicyError(ValueError):
     """A deliberately non-sensitive validation message safe for the caller."""
 
 
-def validate_generated_content(value):
-    if not REQUIRE_USER_AUTH:
-        return
-    if isinstance(value, dict):
-        if value.get("type") in ("image", "image_query") or value.get("image_query"):
-            raise FilePolicyError("Images are not supported in secure exports; use text and tables")
-        for item in value.values():
-            validate_generated_content(item)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            validate_generated_content(item)
-    elif isinstance(value, str) and re.search(r"<\s*img\b|!\[", value, re.IGNORECASE):
-        raise FilePolicyError("Local and remote images are not supported in secure exports; use text and tables")
-
-
 def safe_filename(name):
     if (not isinstance(name, str) or not name or len(name) > 240
             or name in (".", "..") or any(ord(c) < 32 for c in name)

@@ -14,6 +14,7 @@ os.environ.update(REQUIRE_USER_AUTH="true", FILE_EXPORT_DIR=tempfile.mkdtemp(),
                   JWT_SECRET="admin-fallback-must-never-be-used")
 from tools import file_export_mcp as tool
 from tools import file_security as security
+from tools import secure_images as images
 from docx import Document
 from openpyxl import load_workbook
 from pptx import Presentation
@@ -114,14 +115,22 @@ class SecureExports(unittest.TestCase):
             self.assertNotIn("private", json.dumps(result))
             self.assertNotIn("secret-token", json.dumps(result))
 
-    def test_untrusted_images_fail_explicitly_without_file_or_network_access(self):
-        for content in ("![local](/etc/private.png)", '<img src="http://169.254.169.254/latest">',
-                        [{"type":"image_query", "query":"anything"}]):
-            with patch.object(tool, "http_get") as get, patch.object(tool, "http_post") as post:
+    def test_unsafe_image_sources_fail_without_file_or_network_access(self):
+        # More image cases, including allowed sources: test_secure_images.py.
+        cases = [("![local](/etc/private.png)", "Local file paths"),
+                 ('<img src="file:///etc/passwd">', "Local file paths"),
+                 ('<img src="http://169.254.169.254/latest">', "not supported"),
+                 ('<img src="https://169.254.169.254/latest">', "could not be loaded"),
+                 ([{"type": "image_query", "query": "anything"}], "not configured")]
+        for content, message in cases:
+            with self.subTest(content=str(content)[:40]), patch.object(tool, "http_get") as get, \
+                    patch.object(tool, "http_post") as post, patch.object(images, "http_get") as image_get, \
+                    patch.object(images, "_PinnedConnection") as connect, patch.dict(os.environ, {"UNSPLASH_ACCESS_KEY": ""}):
                 result = asyncio.run(tool.create_file({"format":"pdf", "content":content}, mcpo_headers=HEADERS))
                 self.assertFalse(result["success"])
-                self.assertIn("not supported", result["error"]["message"])
-                get.assert_not_called(); post.assert_not_called()
+                self.assertIn(message, result["error"]["message"])
+                for mock in (get, post, image_get, connect):
+                    mock.assert_not_called()
 
     def test_http_has_timeouts_and_no_credential_redirect(self):
         for method in ("get", "post"):
