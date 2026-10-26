@@ -35,23 +35,29 @@ base="http://127.0.0.1:$host_port"
 # What counts as "serves" per image: the file server answers its own route,
 # MCPO lists the file tools (its MCP server process started), the SSE server
 # completes an MCP initialize over streamable HTTP.
+# The whole answer is read before it is searched: piped into `grep -q`, a
+# longer answer (MCPO's openapi.json) can make curl fail writing once grep has
+# matched, and with pipefail that counts as no answer.
 probe() {
+  local body
   case "$kind" in
     file-export-server)
       # legacy mode: "File not found"; REQUIRE_USER_AUTH=true: the pointer to
       # the authenticated Open WebUI link.
-      curl -s --max-time 5 "$base/files/probe/missing.txt" \
-        | grep -qE 'File not found|authenticated Open WebUI file link'
+      body=$(curl -s --max-time 5 "$base/files/probe/missing.txt") || return 1
+      grep -qE 'File not found|authenticated Open WebUI file link' <<<"$body"
       ;;
     mcpo)
-      curl -sf --max-time 5 "$base/file_export/openapi.json" | grep -q '/create_file'
+      body=$(curl -sf --max-time 5 "$base/file_export/openapi.json") || return 1
+      grep -q '/create_file' <<<"$body"
       ;;
     sse_http)
-      curl -s --max-time 5 -X POST "$base/mcp" \
+      body=$(curl -s --max-time 5 -X POST "$base/mcp" \
         -H 'Content-Type: application/json' \
         -H 'Accept: application/json, text/event-stream' \
-        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ci-probe","version":"0"}}}' \
-        | grep -q '"serverInfo"'
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ci-probe","version":"0"}}}') \
+        || return 1
+      grep -q '"serverInfo"' <<<"$body"
       ;;
   esac
 }
