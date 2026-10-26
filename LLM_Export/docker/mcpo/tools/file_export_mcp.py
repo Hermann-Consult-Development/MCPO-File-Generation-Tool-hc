@@ -17,8 +17,10 @@ import zipfile
 import py7zr
 import logging
 import requests
-from .file_security import REQUIRE_USER_AUTH, FilePolicyError, safe_filename, safe_join, user_token as _user_token, file_id as checked_file_id, http_get, http_post, public_error, validate_generated_content
+from .file_security import REQUIRE_USER_AUTH, FilePolicyError, safe_filename, safe_join, user_token as _user_token, file_id as checked_file_id, http_get, http_post, public_error
+from . import secure_images
 from .spreadsheet_formulas import relocate_formula
+from html import escape as html_escape
 from .file_input import FileInput, validate_file_input
 from requests.auth import HTTPBasicAuth
 import threading
@@ -53,7 +55,7 @@ from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from reportlab.lib.units import mm, inch
 from reportlab.lib.pagesizes import A4
 
-SCRIPT_VERSION = "0.8.1-hc.2"
+SCRIPT_VERSION = "0.8.1-hc.4"
 
 URL = os.getenv('OWUI_URL')
 TOKEN = os.getenv('JWT_SECRET') ## will be deleted in 1.0.0
@@ -461,6 +463,56 @@ def process_list_items(ul_or_ol_element, is_ordered=False):
             items.append(ListItem(sub_flowables))
     return items
 
+# Usable width of the A4 frame (72pt margins, 6pt frame padding) and a height
+# that always fits on one page next to a heading.
+PDF_IMAGE_MAX_WIDTH = A4[0] - 2 * 72 - 12
+PDF_IMAGE_MAX_HEIGHT = 0.75 * (A4[1] - 2 * 72 - 12)
+
+
+def _html_image(src, alt=None):
+    return f'<img src="{html_escape(src, quote=True)}" alt="{html_escape(alt or "Image", quote=True)}" />'
+
+
+def _secure_pdf_image(src):
+    """Flowables for one image of an authenticated PDF; unusable sources fail the file."""
+    picture = secure_images.load(*secure_images.classify(src or ""))
+    width, height = picture.fit(PDF_IMAGE_MAX_WIDTH, PDF_IMAGE_MAX_HEIGHT)
+    return [ReportLabImage(picture.stream(), width=width, height=height), Spacer(1, 10)]
+
+
+def _secure_pdf_paragraph(elem, story):
+    """A paragraph with images: its text and its images, in their order."""
+    text = []
+
+    def flush():
+        value = render_text_with_emojis("".join(text).strip())
+        text.clear()
+        if value:
+            story.append(Paragraph(value, styles["CustomNormal"]))
+            story.append(Spacer(1, 6))
+
+    for node in elem.descendants:
+        if isinstance(node, NavigableString):
+            text.append(str(node))
+        elif node.name == "img":
+            flush()
+            story.extend(_secure_pdf_image(node.get("src")))
+    flush()
+
+
+def _check_pdf_images(soup):
+    """Refuse images the renderer would drop, before any image is fetched."""
+    top = [e for e in soup.children if getattr(e, "name", None) in ("p", "img")]
+    placed = sum(1 if e.name == "img" else len(e.find_all("img")) for e in top)
+    if placed != len(soup.find_all("img")):
+        raise FilePolicyError("Images inside lists, tables, quotes or headings are not supported; "
+                              "put each image in its own paragraph")
+    for node in soup.find_all(string=re.compile(r"!\[[^\]]*\]\(")):
+        if not node.find_parent(["code", "pre"]):
+            raise FilePolicyError("An image link could not be read; write it as ![description](link) "
+                                  "with no spaces in the link")
+
+
 def render_html_elements(soup):
     log.debug("Starting render_html_elements...")
     story = []
@@ -494,7 +546,9 @@ def render_html_elements(soup):
                 story.append(Spacer(1, 6))
             elif tag_name == "p":
                 imgs = elem.find_all("img")
-                if imgs:
+                if imgs and REQUIRE_USER_AUTH:
+                    _secure_pdf_paragraph(elem, story)
+                elif imgs:
                     for img_tag in imgs:
                         src = img_tag.get("src")
                         alt = img_tag.get("alt", "[Image]")
@@ -629,6 +683,8 @@ def render_html_elements(soup):
                     log.debug(f"Adding Code/Pre block: {text[:50]}...")
                     story.append(Paragraph(text, styles["CustomCode"]))
                     story.append(Spacer(1, 6 if tag_name == "code" else 8))
+            elif tag_name == "img" and REQUIRE_USER_AUTH:
+                story.extend(_secure_pdf_image(elem.get("src")))
             elif tag_name == "img":
                 src = elem.get("src")
                 alt = elem.get("alt", "[Image]")
@@ -731,8 +787,11 @@ def _convert_markdown_to_structured(markdown_content):
         line = line.strip()
         if not line:
             continue
-            
-        if line.startswith('# '):
+
+        image = secure_images.image_line(line) if REQUIRE_USER_AUTH else None
+        if image:
+            structured.append({"type": "image", "src": image[1], "alt": image[0]})
+        elif line.startswith('# '):
             structured.append({"text": line[2:].strip(), "type": "title"})
         elif line.startswith('## '):
             structured.append({"text": line[3:].strip(), "type": "heading"})
@@ -908,23 +967,33 @@ def _create_pdf(text: str | list[str], filename: str, folder_path: str | None = 
                                 table_lines.append("| " + " | ".join("---" for _ in row) + " |")
                     if table_lines:
                         md_parts.append("\n".join(table_lines))
+                elif t in ("image","image_query") and REQUIRE_USER_AUTH:
+                    source = secure_images.source_of(item if t == "image" else {"query": item.get("query")})
+                    md_parts.append(_html_image(secure_images.link(*source), item.get("alt")))
                 elif t in ("image","image_query"):
                     query = item.get("query","")
                     if query:
                         md_parts.append(f"![Image](image_query: {query})")
     else:
         md_parts = [str(text or "")]
-        
-    md_text = "\n\n".join(md_parts)    
-   
+
+    md_text = "\n\n".join(md_parts)
+
     def replace_image_query(match):
         query = match.group(1).strip()
         image_url = search_image(query)
         return f'\n\n<img src="{image_url}" alt="Image: {query}" />\n\n' if image_url else ""
 
-    md_text = re.sub(r'!\[[^\]]*\]\(\s*image_query:\s*([^)]+)\)', replace_image_query, md_text)
+    def secure_image_query(match):
+        # The search runs when the image is loaded, so its result stays on the provider's hosts.
+        return "\n\n" + _html_image(secure_images.link("query", match.group(2).strip()), match.group(1)) + "\n\n"
+
+    md_text = re.sub(r'!\[([^\]]*)\]\(\s*image_query:\s*([^)]+)\)', secure_image_query, md_text) if REQUIRE_USER_AUTH \
+        else re.sub(r'!\[[^\]]*\]\(\s*image_query:\s*([^)]+)\)', replace_image_query, md_text)
     html = markdown2.markdown(md_text, extras=['fenced-code-blocks','tables','break-on-newline','cuddled-lists'])
     soup = BeautifulSoup(html, "html.parser")
+    if REQUIRE_USER_AUTH:
+        _check_pdf_images(soup)
     story = render_html_elements(soup) or [Paragraph("Empty Content", styles["CustomNormal"])]
 
     doc = SimpleDocTemplate(filepath, pagesize=A4, topMargin=72, bottomMargin=72, leftMargin=72, rightMargin=72)
@@ -935,6 +1004,54 @@ def _create_pdf(text: str | list[str], filename: str, folder_path: str | None = 
         raise FilePolicyError("PDF generation failed; no file was uploaded. Reduce oversized headers or unsupported layout elements.") from e
 
     return {"url": _public_url(folder_path, fname), "path": filepath}
+
+def _slide_image_layout(pos, size, slide_w_in, slide_h_in, page_margin, gutter, title_bottom_in):
+    """Image box and the content box next to it, in inches."""
+    if size == "small":
+        img_w_in, img_h_in = 2.0, 1.5
+    elif size == "large":
+        img_w_in, img_h_in = 4.0, 3.0
+    else:
+        img_w_in, img_h_in = 3.0, 2.0
+
+    if pos == "left":
+        img_left_in = page_margin
+        img_top_in = title_bottom_in
+        content_left_in = img_left_in + img_w_in + gutter
+        content_top_in = title_bottom_in
+        content_width_in = max(slide_w_in - page_margin - content_left_in, 2.5)
+        content_height_in = slide_h_in - (title_bottom_in + page_margin)
+    elif pos == "right":
+        img_left_in = max(slide_w_in - page_margin - img_w_in, page_margin)
+        img_top_in = title_bottom_in
+        content_left_in = page_margin
+        content_top_in = title_bottom_in
+        content_width_in = max(img_left_in - gutter - content_left_in, 2.5)
+        content_height_in = slide_h_in - (title_bottom_in + page_margin)
+    elif pos == "top":
+        img_left_in = slide_w_in - page_margin - img_w_in
+        img_top_in = title_bottom_in
+        content_left_in = page_margin
+        content_top_in = img_top_in + img_h_in + gutter
+        content_width_in = slide_w_in - 2*page_margin
+        content_height_in = max(slide_h_in - page_margin - content_top_in, 2.0)
+    elif pos == "bottom":
+        img_left_in = slide_w_in - page_margin - img_w_in
+        img_top_in = max(slide_h_in - page_margin - img_h_in, page_margin)
+        content_left_in = page_margin
+        content_top_in = title_bottom_in
+        content_width_in = slide_w_in - 2*page_margin
+        content_height_in = max(img_top_in - gutter - content_top_in, 2.0)
+    else:
+        img_left_in = max(slide_w_in - page_margin - img_w_in, page_margin)
+        img_top_in = title_bottom_in
+        content_left_in = page_margin
+        content_top_in = title_bottom_in
+        content_width_in = max(img_left_in - gutter - content_left_in, 2.5)
+        content_height_in = slide_h_in - (title_bottom_in + page_margin)
+    return ((img_left_in, img_top_in, img_w_in, img_h_in),
+            (content_left_in, content_top_in, content_width_in, content_height_in))
+
 
 def _create_presentation(slides_data: list[dict], filename: str, folder_path: str | None = None, title: str | None = None) -> dict:
     if folder_path is None:
@@ -1088,7 +1205,18 @@ def _create_presentation(slides_data: list[dict], filename: str, folder_path: st
         content_width_in = slide_w_in - 2*page_margin
         content_height_in = slide_h_in - (title_bottom_in + page_margin)
 
-        image_query = slide_data.get("image_query")
+        layout = (slide_data.get("image_position", "right"), slide_data.get("image_size", "medium"),
+                  slide_w_in, slide_h_in, page_margin, gutter, title_bottom_in)
+        source = secure_images.slide_source(slide_data) if REQUIRE_USER_AUTH else None
+        if source:
+            picture = secure_images.load(*source)
+            (box_left, box_top, box_w, box_h), content_box = _slide_image_layout(*layout)
+            width, height = picture.fill(box_w, box_h)
+            slide.shapes.add_picture(picture.stream(), Inches(box_left + (box_w - width) / 2),
+                                     Inches(box_top + (box_h - height) / 2), Inches(width), Inches(height))
+            content_left_in, content_top_in, content_width_in, content_height_in = content_box
+
+        image_query = None if REQUIRE_USER_AUTH else slide_data.get("image_query")
         if image_query:
             image_url = search_image(image_query)
             if image_url:
@@ -1099,51 +1227,9 @@ def _create_presentation(slides_data: list[dict], filename: str, folder_path: st
                     response.raise_for_status()
                     image_data = response.content
                     image_stream = BytesIO(image_data)
-                    pos = slide_data.get("image_position", "right")
-                    size = slide_data.get("image_size", "medium")
-                    if size == "small":
-                        img_w_in, img_h_in = 2.0, 1.5
-                    elif size == "large":
-                        img_w_in, img_h_in = 4.0, 3.0
-                    else:
-                        img_w_in, img_h_in = 3.0, 2.0
+                    (img_left_in, img_top_in, img_w_in, img_h_in), \
+                        (content_left_in, content_top_in, content_width_in, content_height_in) = _slide_image_layout(*layout)
                     log.debug(f"Image dimensions: {img_w_in} x {img_h_in} inches")
-
-                    if pos == "left":
-                        img_left_in = page_margin
-                        img_top_in = title_bottom_in
-                        content_left_in = img_left_in + img_w_in + gutter
-                        content_top_in = title_bottom_in
-                        content_width_in = max(slide_w_in - page_margin - content_left_in, 2.5)
-                        content_height_in = slide_h_in - (title_bottom_in + page_margin)
-                    elif pos == "right":
-                        img_left_in = max(slide_w_in - page_margin - img_w_in, page_margin)
-                        img_top_in = title_bottom_in
-                        content_left_in = page_margin
-                        content_top_in = title_bottom_in
-                        content_width_in = max(img_left_in - gutter - content_left_in, 2.5)
-                        content_height_in = slide_h_in - (title_bottom_in + page_margin)
-                    elif pos == "top":
-                        img_left_in = slide_w_in - page_margin - img_w_in
-                        img_top_in = title_bottom_in
-                        content_left_in = page_margin
-                        content_top_in = img_top_in + img_h_in + gutter
-                        content_width_in = slide_w_in - 2*page_margin
-                        content_height_in = max(slide_h_in - page_margin - content_top_in, 2.0)
-                    elif pos == "bottom":
-                        img_left_in = slide_w_in - page_margin - img_w_in
-                        img_top_in = max(slide_h_in - page_margin - img_h_in, page_margin)
-                        content_left_in = page_margin
-                        content_top_in = title_bottom_in
-                        content_width_in = slide_w_in - 2*page_margin
-                        content_height_in = max(img_top_in - gutter - content_top_in, 2.0)
-                    else:
-                        img_left_in = max(slide_w_in - page_margin - img_w_in, page_margin)
-                        img_top_in = title_bottom_in
-                        content_left_in = page_margin
-                        content_top_in = title_bottom_in
-                        content_width_in = max(img_left_in - gutter - content_left_in, 2.5)
-                        content_height_in = slide_h_in - (title_bottom_in + page_margin)
 
                     slide.shapes.add_picture(image_stream, Inches(img_left_in), Inches(img_top_in), Inches(img_w_in), Inches(img_h_in))
                     log.debug(f"Image added at position: left={img_left_in}, top={img_top_in}")
@@ -1204,6 +1290,17 @@ def _add_markdown_runs(paragraph, text):
             run.font.italic = True
         else:
             paragraph.add_run(token)
+
+def _secure_docx_image(doc, item):
+    """One image of an authenticated DOCX: natural size, at most the text width."""
+    if "src" in item:
+        source = secure_images.classify(item["src"])
+    else:
+        source = secure_images.source_of(item if item.get("type") == "image" else {"query": item.get("query")})
+    picture = secure_images.load(*source)
+    width, _ = picture.fit(6.0, 8.0, unit=1)
+    doc.add_picture(picture.stream(), width=Inches(width))
+
 
 def _create_word(content: list[dict] | str, filename: str, folder_path: str | None = None, title: str | None = None) -> dict:
     log.debug("Creating Word document")
@@ -1266,11 +1363,16 @@ def _create_word(content: list[dict] | str, filename: str, folder_path: str | No
         log.debug("Document title added")
 
     for item in content or []:
-        if isinstance(item, str):
+        image = secure_images.image_line(item) if REQUIRE_USER_AUTH else None
+        if image:
+            _secure_docx_image(doc, {"src": image[1]})
+        elif isinstance(item, str):
             p = doc.add_paragraph()
             _add_markdown_runs(p, item)
         elif isinstance(item, dict):
-            if item.get("type") == "image_query":
+            if REQUIRE_USER_AUTH and item.get("type") in ("image", "image_query"):
+                _secure_docx_image(doc, item)
+            elif item.get("type") == "image_query":
                 new_item = {
                     "type": "image",
                     "query": item.get("query")
@@ -3033,10 +3135,20 @@ a template places it elsewhere. Existing other sheets are not moved. Named or
 structured ranges, INDIRECT, external workbooks and multi-sheet ranges are unsupported
 and return an error. Formula results are calculated when opened in a spreadsheet
 application; this tool does not fabricate cached values.
+Images (PDF, DOCX, PPTX): {"type":"image","file_id":"<id>"} places the user's own
+uploaded or generated Open WebUI image (id from the chat's file list or from an
+/api/v1/files/<id>/content link); {"type":"image","url":"https://..."} a public web
+image; {"type":"image","query":"..."} a photo from the configured image search.
+PDF text may also use ![description](link); in DOCX such a link must be its own line.
+A PPTX slide takes one of image_file_id, image_url or image_query, with
+image_position left|right|top|bottom and image_size small|medium|large.
+Local paths are refused; an image that cannot be loaded fails the file with a
+message that names it.
 """
     token = _forwarded_token(mcpo_headers)
     data = validate_file_input(data)
-    validate_generated_content(data)
+    if REQUIRE_USER_AUTH:
+        secure_images.validate_request(data)
     filename = data.get("filename")
     if filename: safe_filename(filename)
     if not re.fullmatch(r"[a-zA-Z0-9]*", data.get("format") or ""): raise ValueError("Invalid file format")
@@ -3046,19 +3158,20 @@ application; this tool does not fabricate cached values.
     content = data.get("content")
     title = data.get("title")
 
-    if format_type == "pdf":
-        result = _create_pdf(content if isinstance(content, list) else [str(content or "")], filename, folder_path=folder_path)
-    elif format_type == "pptx":
-        result = _create_presentation(data.get("slides_data", []), filename, folder_path=folder_path, title=title)
-    elif format_type == "docx":
-        result = _create_word(content if content is not None else [], filename, folder_path=folder_path, title=title)
-    elif format_type == "xlsx":
-        result = _create_excel(content if content is not None else [], filename, folder_path=folder_path, title=title)
-    elif format_type == "csv":
-        result = _create_csv(content if content is not None else [], filename, folder_path=folder_path)
-    else:
-        use_filename = filename or f"export.{format_type or 'txt'}"
-        result = _create_raw_file(content if content is not None else "", use_filename, folder_path=folder_path)
+    with secure_images.request_scope(token):
+        if format_type == "pdf":
+            result = _create_pdf(content if isinstance(content, list) else [str(content or "")], filename, folder_path=folder_path)
+        elif format_type == "pptx":
+            result = _create_presentation(data.get("slides_data", []), filename, folder_path=folder_path, title=title)
+        elif format_type == "docx":
+            result = _create_word(content if content is not None else [], filename, folder_path=folder_path, title=title)
+        elif format_type == "xlsx":
+            result = _create_excel(content if content is not None else [], filename, folder_path=folder_path, title=title)
+        elif format_type == "csv":
+            result = _create_csv(content if content is not None else [], filename, folder_path=folder_path)
+        else:
+            use_filename = filename or f"export.{format_type or 'txt'}"
+            result = _create_raw_file(content if content is not None else "", use_filename, folder_path=folder_path)
 
     if not persistent and not REQUIRE_USER_AUTH:
         _cleanup_files(folder_path, FILES_DELAY)
@@ -3075,10 +3188,12 @@ application; this tool does not fabricate cached values.
 @mcp.tool()
 @_tool_boundary
 async def generate_and_archive(files_data: list[FileInput], archive_format: str = "zip", archive_name: str = None, persistent: bool = PERSISTENT_FILES, mcpo_headers: dict = None) -> dict:
-    """files_data=[{"format":"pdf","filename":"report.pdf","content":[{"type":"title","text":"..."},{"type":"paragraph","text":"..."}],"title":"..."},{"format":"docx","filename":"doc.docx","content":[{"type":"title","text":"..."},{"type":"list","items":[...]}],"title":"..."},{"format":"pptx","filename":"slides.pptx","slides_data":[{"title":"...","content":[...],"image_query":"...","image_position":"left|right|top|bottom","image_size":"small|medium|large"}],"title":"..."},{"format":"xlsx","filename":"data.xlsx","content":[["Header1","Header2"],["Val1","Val2"]],"title":"..."},{"format":"csv","filename":"data.csv","content":[[...]]},{"format":"txt|xml|py|etc","filename":"file.ext","content":"string"}]"""
+    """files_data=[{"format":"pdf","filename":"report.pdf","content":[{"type":"title","text":"..."},{"type":"paragraph","text":"..."}],"title":"..."},{"format":"docx","filename":"doc.docx","content":[{"type":"title","text":"..."},{"type":"list","items":[...]}],"title":"..."},{"format":"pptx","filename":"slides.pptx","slides_data":[{"title":"...","content":[...],"image_query":"...","image_position":"left|right|top|bottom","image_size":"small|medium|large"}],"title":"..."},{"format":"xlsx","filename":"data.xlsx","content":[["Header1","Header2"],["Val1","Val2"]],"title":"..."},{"format":"csv","filename":"data.csv","content":[[...]]},{"format":"txt|xml|py|etc","filename":"file.ext","content":"string"}]
+Images as in create_file: image blocks with file_id, url or query; slides with image_file_id, image_url or image_query."""
     token = _forwarded_token(mcpo_headers)
     files_data = [validate_file_input(item) for item in files_data]
-    validate_generated_content(files_data)
+    if REQUIRE_USER_AUTH and sum(len(secure_images.validate_request(item)) for item in files_data) > secure_images.MAX_COUNT:
+        raise FilePolicyError(f"At most {secure_images.MAX_COUNT} images per request are supported")
     if archive_name: safe_filename(archive_name)
     for item in files_data or []:
         if item.get("filename"): safe_filename(item["filename"])
@@ -3086,31 +3201,32 @@ async def generate_and_archive(files_data: list[FileInput], archive_format: str 
     folder_path = _generate_unique_folder()
     generated_paths: list[str] = []
 
-    for file_info in files_data or []:
-        fmt = (file_info.get("format") or "").lower()
-        fname = file_info.get("filename")
-        content = file_info.get("content")
-        title = file_info.get("title")
+    with secure_images.request_scope(token):
+        for file_info in files_data or []:
+            fmt = (file_info.get("format") or "").lower()
+            fname = file_info.get("filename")
+            content = file_info.get("content")
+            title = file_info.get("title")
 
-        try:
-            if fmt == "pdf":
-                res = _create_pdf(content if isinstance(content, list) else [str(content or "")], fname, folder_path=folder_path)
-            elif fmt == "pptx":
-                res = _create_presentation(file_info.get("slides_data", []), fname, folder_path=folder_path, title=title)
-            elif fmt == "docx":
-                res = _create_word(content if content is not None else [], fname, folder_path=folder_path, title=title)
-            elif fmt == "xlsx":
-                res = _create_excel(content if content is not None else [], fname, folder_path=folder_path, title=title)
-            elif fmt == "csv":
-                res = _create_csv(content if content is not None else [], fname, folder_path=folder_path)
-            else:
-                use_fname = fname or f"export.{fmt or 'txt'}"
-                res = _create_raw_file(content if content is not None else "", use_fname, folder_path=folder_path)
-        except Exception as e:
-            log.error(f"Error generating file {fname or '<no name>'}: {e}", exc_info=True)
-            raise
+            try:
+                if fmt == "pdf":
+                    res = _create_pdf(content if isinstance(content, list) else [str(content or "")], fname, folder_path=folder_path)
+                elif fmt == "pptx":
+                    res = _create_presentation(file_info.get("slides_data", []), fname, folder_path=folder_path, title=title)
+                elif fmt == "docx":
+                    res = _create_word(content if content is not None else [], fname, folder_path=folder_path, title=title)
+                elif fmt == "xlsx":
+                    res = _create_excel(content if content is not None else [], fname, folder_path=folder_path, title=title)
+                elif fmt == "csv":
+                    res = _create_csv(content if content is not None else [], fname, folder_path=folder_path)
+                else:
+                    use_fname = fname or f"export.{fmt or 'txt'}"
+                    res = _create_raw_file(content if content is not None else "", use_fname, folder_path=folder_path)
+            except Exception as e:
+                log.error(f"Error generating file {fname or '<no name>'}: {e}", exc_info=True)
+                raise
 
-        generated_paths.append(res["path"])
+            generated_paths.append(res["path"])
 
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     archive_basename = f"{archive_name or 'archive'}_{timestamp}"
