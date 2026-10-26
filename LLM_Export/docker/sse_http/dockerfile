@@ -1,4 +1,6 @@
-FROM python:3.11-slim
+# Base image and Python packages are fixed: an unpinned build installed mcp 2.x,
+# which removed mcp.server.fastmcp, and the server stopped starting.
+FROM python:3.11.17-slim-trixie@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce
 
 WORKDIR /rootPath
 
@@ -11,20 +13,10 @@ RUN apt-get update && apt-get install -y \
     libxslt1-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir \
-    requests \
-    python-docx \
-    python-pptx \
-    openpyxl \
-    reportlab \
-    beautifulsoup4 \
-    markdown2 \
-    emoji \
-    py7zr \
-    uvicorn \
-    starlette \
-    pillow \
-    mcp[fastmcp]
+# requirements.txt is the full resolved set (see requirements.in).
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt \
+ && pip check
 
 COPY config.json /rootPath
 COPY tools /rootPath/tools
